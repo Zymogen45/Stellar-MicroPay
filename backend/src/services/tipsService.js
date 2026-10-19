@@ -6,6 +6,20 @@
 
 "use strict";
 
+const usernameService = require("./usernameService");
+const { getLeaderboardOptOutStore } = require("../storage/leaderboardOptOutStore");
+
+/**
+ * Accounts that opted out of public leaderboards (#1511) are removed from
+ * every ranking the API returns: global recipients/senders and a creator's
+ * top tippers. Aggregate totals (tip count, total XLM) still include their
+ * tips, because a sum does not identify anyone and dropping them would make
+ * the totals disagree with the tips that actually happened.
+ */
+function isListed(publicKey) {
+  return !getLeaderboardOptOutStore().isOptedOut(publicKey);
+}
+
 // In-memory storage for tips
 // Structure: Map<creatorPublicKey, TipRecord[]>
 const tipsByCreator = new Map();
@@ -122,7 +136,7 @@ function getTipsStats(creatorPublicKey) {
   if (tips.length > 0) {
     const totalAmount = tips.reduce((sum, tip) => sum + parseFloat(tip.amount), 0);
     stats.averageTip = String(totalAmount / tips.length);
-    
+
     const amounts = tips.map(t => parseFloat(t.amount));
     stats.largestTip = String(Math.max(...amounts));
     stats.smallestTip = String(Math.min(...amounts));
@@ -170,9 +184,52 @@ function getTipsSent(senderPublicKey, options = {}) {
   };
 }
 
+function getLeaderboard() {
+  const recipientTotals = new Map();
+  const senderTotals = new Map();
+  let totalTips = 0;
+  let totalXLM = 0;
+
+  for (const tips of tipsByCreator.values()) {
+    for (const tip of tips) {
+      if ((tip.asset || "XLM") !== "XLM") continue;
+      const amount = Number.parseFloat(tip.amount);
+      if (!Number.isFinite(amount)) continue;
+      totalTips += 1;
+      totalXLM += amount;
+      recipientTotals.set(tip.creatorPublicKey, (recipientTotals.get(tip.creatorPublicKey) || 0) + amount);
+      senderTotals.set(tip.senderPublicKey, (senderTotals.get(tip.senderPublicKey) || 0) + amount);
+    }
+  }
+  const federationNames = new Map(
+    usernameService.getAllUsernames().map(({ username, publicKey }) => [
+      publicKey,
+      `${username}*${process.env.DOMAIN || "stellarmicropay.com"}`,
+    ])
+  );
+  const ranked = (totals) => [...totals.entries()]
+    .filter(([publicKey]) => isListed(publicKey))
+    .map(([publicKey, amount]) => ({ publicKey, federationName: federationNames.get(publicKey) || null, totalXLM: amount.toFixed(7) }))
+    .sort((a, b) => Number(b.totalXLM) - Number(a.totalXLM))
+    .slice(0, 10);
+  return { recipients: ranked(recipientTotals), senders: ranked(senderTotals), totalTips, totalXLM: totalXLM.toFixed(7) };
+}
+
 /**
  * Validate tip record input.
  */
+/** Whether `publicKey` has opted out of the public leaderboards (#1511). */
+function getLeaderboardOptOut(publicKey) {
+  const store = getLeaderboardOptOutStore();
+  return { publicKey, optedOut: store.isOptedOut(publicKey), optedOutAt: store.optedOutAt(publicKey) };
+}
+
+/** Opts `publicKey` in or out of the public leaderboards. Durable on return. */
+function setLeaderboardOptOut(publicKey, optOut) {
+  getLeaderboardOptOutStore().setOptOut(publicKey, Boolean(optOut));
+  return getLeaderboardOptOut(publicKey);
+}
+
 function validateTipInput(data) {
   const errors = [];
 
@@ -227,7 +284,9 @@ function getTopTippers(creatorPublicKey, limit = 5) {
   }
 
   // Convert to array
-  const entries = Array.from(totals.entries()).map(([senderPublicKey, totalAmount]) => ({
+  const entries = Array.from(totals.entries())
+    .filter(([senderPublicKey]) => isListed(senderPublicKey))
+    .map(([senderPublicKey, totalAmount]) => ({
     senderPublicKey,
     totalAmount: totalAmount.toFixed(7),
   }));
@@ -242,12 +301,99 @@ function getTopTippers(creatorPublicKey, limit = 5) {
   return result;
 }
 
+/**
+ * Get global leaderboard with top recipients and senders.
+ * @returns {object} Object with topRecipients, topSenders, and totalTipped
+ */
+function getGlobalLeaderboard() {
+  const TOP_LIMIT = 10;
+  
+  // Aggregate by recipient (creators)
+  const recipientTotals = new Map();
+  // Aggregate by sender
+  const senderTotals = new Map();
+  let totalTipped = 0;
+
+  for (const tips of tipsByCreator.values()) {
+    for (const tip of tips) {
+      const amount = parseFloat(tip.amount) || 0;
+      totalTipped += amount;
+
+      // Aggregate by recipient
+      recipientTotals.set(
+        tip.creatorPublicKey,
+        (recipientTotals.get(tip.creatorPublicKey) || 0) + amount
+      );
+
+      // Aggregate by sender
+      senderTotals.set(
+        tip.senderPublicKey,
+        (senderTotals.get(tip.senderPublicKey) || 0) + amount
+      );
+    }
+  }
+
+  // Convert recipients to array with counts
+  const recipientCounts = new Map();
+  for (const tips of tipsByCreator.values()) {
+    for (const tip of tips) {
+      recipientCounts.set(
+        tip.creatorPublicKey,
+        (recipientCounts.get(tip.creatorPublicKey) || 0) + 1
+      );
+    }
+  }
+
+  const topRecipients = Array.from(recipientTotals.entries())
+    .filter(([address]) => isListed(address))
+    .map(([address, totalXLM]) => ({
+      address,
+      federationName: null, // Could be resolved from federation service
+      totalXLM: totalXLM.toFixed(7),
+      count: recipientCounts.get(address) || 0,
+    }))
+    .sort((a, b) => parseFloat(b.totalXLM) - parseFloat(a.totalXLM))
+    .slice(0, TOP_LIMIT);
+
+  // Convert senders to array with counts
+  const senderCounts = new Map();
+  for (const tips of tipsByCreator.values()) {
+    for (const tip of tips) {
+      senderCounts.set(
+        tip.senderPublicKey,
+        (senderCounts.get(tip.senderPublicKey) || 0) + 1
+      );
+    }
+  }
+
+  const topSenders = Array.from(senderTotals.entries())
+    .filter(([address]) => isListed(address))
+    .map(([address, totalXLM]) => ({
+      address,
+      federationName: null, // Could be resolved from federation service
+      totalXLM: totalXLM.toFixed(7),
+      count: senderCounts.get(address) || 0,
+    }))
+    .sort((a, b) => parseFloat(b.totalXLM) - parseFloat(a.totalXLM))
+    .slice(0, TOP_LIMIT);
+
+  return {
+    topRecipients,
+    topSenders,
+    totalTipped: totalTipped.toFixed(7),
+  };
+}
+
 module.exports = {
   recordTip,
   getTipsReceived,
   getTipsStats,
   getTipsSent,
+  getLeaderboard,
   validateTipInput,
   getTopTippers,
-  tipsByCreator,
+  getGlobalLeaderboard,
+  getLeaderboardOptOut,
+  setLeaderboardOptOut,
+  _clearForTesting: () => tipsByCreator.clear(),
 };

@@ -1,80 +1,126 @@
 /**
  * contexts/I18nContext.tsx
  * React context provider for internationalization.
+ *
+ * Mount `I18nProvider` once (see `pages/_app.tsx`) and call `useTranslation()`
+ * anywhere below it:
+ *
+ *   const { t, locale, setLocale } = useTranslation();
+ *   <h1>{t("dashboard.title")}</h1>
+ *
+ * Initial locale (#1459): an explicit choice from the language picker always
+ * wins, otherwise the browser's preferred language is used (`es-MX` opens in
+ * Spanish), otherwise English. `setLocale()` persists the manual choice so
+ * detection never overrides it again; `resetLocale()` hands control back to
+ * detection.
+ *
+ * The context has an English default value, so components rendered without a
+ * provider (for example in unit tests) keep working instead of throwing.
  */
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import {
-  Locale,
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import {
   DEFAULT_LOCALE,
   SUPPORTED_LOCALES,
-  getStoredLocale,
+  applyDocumentLocale,
+  clearLocaleOverride,
+  createTranslator,
+  detectBrowserLocale,
+  isLocale,
+  resolveInitialLocale,
   setStoredLocale,
-  getTranslations,
-  isRTL,
-  type Translations,
-} from '@/lib/i18n';
+  type Locale,
+  type Translate,
+} from "@/lib/i18n";
 
-interface I18nContextType {
+export interface I18nContextValue {
+  /** Active locale. */
   locale: Locale;
+  /**
+   * Switch locale: updates state, `<html lang>` and localStorage immediately.
+   * The persisted choice wins over browser detection on every later visit.
+   */
   setLocale: (locale: Locale) => void;
-  t: Translations;
-  isRTL: boolean;
-  supportedLocales: Locale[];
+  /** Forget the manual choice and re-apply browser detection (#1459). */
+  resetLocale: () => void;
+  /** Translator bound to {@link I18nContextValue.locale}. */
+  t: Translate;
+  /** Locales the language picker can offer. */
+  availableLocales: readonly Locale[];
 }
 
-const I18nContext = createContext<I18nContextType | undefined>(undefined);
+/** English-only default so `useTranslation()` works outside a provider. */
+export const defaultI18nValue: I18nContextValue = {
+  locale: DEFAULT_LOCALE,
+  setLocale: () => {},
+  resetLocale: () => {},
+  t: createTranslator(DEFAULT_LOCALE),
+  availableLocales: SUPPORTED_LOCALES,
+};
+
+const I18nContext = createContext<I18nContextValue>(defaultI18nValue);
 
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(DEFAULT_LOCALE);
-  const [isClient, setIsClient] = useState(false);
 
-  // Initialize locale from localStorage on mount
+  // Hydration can't read localStorage or navigator, so the effective locale is
+  // resolved on mount: manual choice first, then browser detection (#1459).
   useEffect(() => {
-    setIsClient(true);
-    const storedLocale = getStoredLocale();
-    setLocaleState(storedLocale);
+    const initial = resolveInitialLocale();
+    setLocaleState(initial);
+    applyDocumentLocale(initial);
   }, []);
 
-  const setLocale = (newLocale: Locale) => {
-    if (!SUPPORTED_LOCALES.includes(newLocale)) {
-      console.warn(`Unsupported locale: ${newLocale}`);
-      return;
-    }
-    
-    setLocaleState(newLocale);
-    setStoredLocale(newLocale);
-    
-    // Update document direction for RTL support
-    if (typeof document !== 'undefined') {
-      document.documentElement.dir = isRTL(newLocale) ? 'rtl' : 'ltr';
-      document.documentElement.lang = newLocale;
-    }
-  };
+  const setLocale = useCallback((next: Locale) => {
+    if (!isLocale(next)) return;
 
-  // Set initial document direction
-  useEffect(() => {
-    if (isClient && typeof document !== 'undefined') {
-      document.documentElement.dir = isRTL(locale) ? 'rtl' : 'ltr';
-      document.documentElement.lang = locale;
-    }
-  }, [locale, isClient]);
+    setLocaleState(next);
+    setStoredLocale(next);
+    applyDocumentLocale(next);
+  }, []);
 
-  const value: I18nContextType = {
-    locale,
-    setLocale,
-    t: getTranslations(locale),
-    isRTL: isRTL(locale),
-    supportedLocales: SUPPORTED_LOCALES,
-  };
+  const resetLocale = useCallback(() => {
+    clearLocaleOverride();
+
+    const detected = detectBrowserLocale();
+    setLocaleState(detected);
+    applyDocumentLocale(detected);
+  }, []);
+
+  const value = useMemo<I18nContextValue>(
+    () => ({
+      locale,
+      setLocale,
+      resetLocale,
+      t: createTranslator(locale),
+      availableLocales: SUPPORTED_LOCALES,
+    }),
+    [locale, setLocale, resetLocale]
+  );
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
-export function useI18n(): I18nContextType {
-  const context = useContext(I18nContext);
-  if (context === undefined) {
-    throw new Error('useI18n must be used within an I18nProvider');
-  }
-  return context;
+/** Full i18n context, including locale control. */
+export function useI18n(): I18nContextValue {
+  return useContext(I18nContext);
+}
+
+/**
+ * Primary hook for components.
+ *
+ * @returns A `t(key, values?)` translator plus the active locale and setter.
+ */
+export function useTranslation() {
+  const { t, locale, setLocale, resetLocale, availableLocales } =
+    useContext(I18nContext);
+  return { t, locale, setLocale, resetLocale, availableLocales };
 }

@@ -1,11 +1,12 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect } from "react";
+import { useTranslation } from "@/contexts/I18nContext";
 
 interface TourStep {
   id: string;
-  title: string;
-  description: string;
+  titleKey: string;
+  descriptionKey: string;
   target: string; // CSS selector
   position: "top" | "bottom" | "left" | "right";
 }
@@ -13,22 +14,22 @@ interface TourStep {
 const tourSteps: TourStep[] = [
   {
     id: "balance",
-    title: "Your Balance",
-    description: "Here you can see your XLM balance and wallet address. This is your main account overview.",
+    titleKey: "onboarding.steps.balance.title",
+    descriptionKey: "onboarding.steps.balance.description",
     target: ".balance-card",
     position: "bottom",
   },
   {
     id: "send-form",
-    title: "Send Payments",
-    description: "Use this form to send XLM payments to other Stellar addresses. Enter the recipient and amount.",
+    titleKey: "onboarding.steps.sendForm.title",
+    descriptionKey: "onboarding.steps.sendForm.description",
     target: ".send-payment-form",
     position: "right",
   },
   {
     id: "transactions",
-    title: "View Transactions",
-    description: "Click here to see all your past transactions and payment history.",
+    titleKey: "onboarding.steps.transactions.title",
+    descriptionKey: "onboarding.steps.transactions.description",
     target: "a[href='/transactions']",
     position: "bottom",
   },
@@ -41,20 +42,8 @@ interface OnboardingTourProps {
 }
 
 export default function OnboardingTour({ isVisible, onComplete, onSkip }: OnboardingTourProps) {
+  const { t } = useTranslation();
   const [currentStep, setCurrentStep] = useState(0);
-  const panelRef = useRef<HTMLDivElement | null>(null);
-
-  const handleNext = useCallback(() => {
-    setCurrentStep((stepIndex) => {
-      if (stepIndex < tourSteps.length - 1) return stepIndex + 1;
-      onComplete();
-      return stepIndex;
-    });
-  }, [onComplete]);
-
-  const handleSkip = useCallback(() => {
-    onSkip();
-  }, [onSkip]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -66,34 +55,12 @@ export default function OnboardingTour({ isVisible, onComplete, onSkip }: Onboar
       targetElement.classList.add("tour-highlight");
     }
 
-    panelRef.current?.focus();
-
     return () => {
       if (targetElement) {
         targetElement.classList.remove("tour-highlight");
       }
     };
   }, [currentStep, isVisible]);
-
-  useEffect(() => {
-    if (!isVisible) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        handleSkip();
-      } else if (event.key === "ArrowRight" || event.key === "ArrowDown" || event.key === "Enter") {
-        event.preventDefault();
-        handleNext();
-      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-        event.preventDefault();
-        setCurrentStep((stepIndex) => Math.max(0, stepIndex - 1));
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isVisible, handleNext, handleSkip]);
 
   if (!isVisible) return null;
 
@@ -133,6 +100,22 @@ export default function OnboardingTour({ isVisible, onComplete, onSkip }: Onboar
     }
   };
 
+  const handleNext = () => {
+    if (currentStep < tourSteps.length - 1) {
+      setCurrentStep(currentStep + 1);
+    } else {
+      onComplete();
+    }
+  };
+
+  const handleBack = () => {
+    setCurrentStep((stepIndex) => Math.max(0, stepIndex - 1));
+  };
+
+  const handleSkip = () => {
+    onSkip();
+  };
+
   return (
     <>
       {/* Overlay */}
@@ -140,32 +123,39 @@ export default function OnboardingTour({ isVisible, onComplete, onSkip }: Onboar
 
       {/* Tooltip */}
       <div
-        ref={panelRef}
-        className="fixed z-50 bg-white dark:bg-gray-800 text-gray-900 dark:text-white p-4 rounded-lg shadow-lg max-w-xs focus:outline-none focus:ring-2 focus:ring-blue-400"
+        className="fixed z-50 bg-white dark:bg-gray-800 text-gray-900 dark:text-white p-4 rounded-lg shadow-lg max-w-xs"
         style={getTooltipPosition()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="onboarding-tour-title"
-        tabIndex={-1}
       >
-        <h3 id="onboarding-tour-title" className="font-semibold text-lg mb-2">{step.title}</h3>
-        <p className="text-sm mb-4">{step.description}</p>
+        <h3 className="font-semibold text-lg mb-2">{t(step.titleKey)}</h3>
+        <p className="text-sm mb-4">{t(step.descriptionKey)}</p>
         <div className="flex justify-between items-center">
           <button
             onClick={handleSkip}
             className="text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
           >
-            Skip tour
+            {t("onboarding.skipTour")}
           </button>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-500">
-              {currentStep + 1} of {tourSteps.length}
+              {t("onboarding.stepProgress", {
+                current: currentStep + 1,
+                total: tourSteps.length,
+              })}
             </span>
+            <button
+              onClick={handleBack}
+              disabled={currentStep === 0}
+              className="text-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {t("common.back")}
+            </button>
             <button
               onClick={handleNext}
               className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm"
             >
-              {currentStep === tourSteps.length - 1 ? "Finish" : "Next"}
+              {currentStep === tourSteps.length - 1
+                ? t("onboarding.finish")
+                : t("onboarding.next")}
             </button>
           </div>
         </div>
